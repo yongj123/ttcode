@@ -26,11 +26,18 @@ interface AppProps {
 
 type ViewMode = "chat" | "sessions";
 
+/** Bash/Write/Edit 需要显式确认，不能空输入通过 */
+function isDangerousTool(toolName?: string): boolean {
+  if (!toolName) return false;
+  return ["execute_command", "write_to_file", "edit_file"].includes(toolName);
+}
+
 export function App({ apiKey, baseURL, model }: AppProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [busy, setBusy] = useState(false);
   const [statusLine, setStatusLine] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>("chat");
+  const [sessions, setSessions] = useState<ReturnType<typeof SessionManager.prototype.list>>([]);
   const { exit } = useApp();
 
   // ---- 持久引用 ----
@@ -43,6 +50,7 @@ export function App({ apiKey, baseURL, model }: AppProps) {
   // ---- 权限确认状态 ----
   const [pendingPermission, setPendingPermission] = useState<{
     approvalMessage: string;
+    toolName?: string;
   } | null>(null);
 
   // ---- 初始化 ----
@@ -65,6 +73,9 @@ export function App({ apiKey, baseURL, model }: AppProps) {
       abortRef.current.abort();
       setBusy(false);
       setStatusLine("已取消");
+      // 释放权限等待（防止 generator 悬挂）
+      permissionResolver.cancel();
+      setPendingPermission(null);
       // 保存当前消息
       const agent = agentRef.current!;
       const currentMessages = agent.getMessages();
@@ -74,20 +85,20 @@ export function App({ apiKey, baseURL, model }: AppProps) {
     }
   });
 
-  // ---- 权限轮询（检查 InteractiveResolver 是否有待确认请求） ----
+  // ---- 权限确认：事件驱动（替代轮询） ----
   useEffect(() => {
-    if (busy) {
-      const interval = setInterval(() => {
-        const pending = permissionResolver.getPending();
-        if (pending) {
-          setPendingPermission({
-            approvalMessage: pending.approvalMessage,
-          });
-        }
-      }, 100);
-      return () => clearInterval(interval);
-    }
-  }, [busy, permissionResolver]);
+    permissionResolver.onPending = (msg: string, toolName: string) => {
+      setPendingPermission({ approvalMessage: msg, toolName });
+    };
+    return () => {
+      permissionResolver.onPending = null;
+    };
+  }, [permissionResolver]);
+
+  // ---- 初次加载 session 列表 ----
+  useEffect(() => {
+    setSessions(sessionManager.list());
+  }, [sessionManager]);
 
   // ---- 提交处理 ----
   const handleSubmit = useCallback(
@@ -219,6 +230,7 @@ export function App({ apiKey, baseURL, model }: AppProps) {
           break;
         case "/sessions":
         case "/list":
+          setSessions(sessionManager.list());
           setViewMode("sessions");
           break;
         default:
@@ -240,13 +252,33 @@ export function App({ apiKey, baseURL, model }: AppProps) {
       setViewMode("chat");
       agentRef.current!.setMessages(session.messages);
 
-      // 重建 UI messages
-      const uiMessages: ChatMessage[] = session.messages
-        .filter((m) => m.role !== "system")
-        .map((m) => ({
-          role: m.role as ChatMessage["role"],
-          content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
-        }));
+      // 转换 ChatCompletionMessageParam → ChatMessage（用于 UI 展示）
+      const uiMessages: ChatMessage[] = [];
+      for (const m of session.messages) {
+        if (m.role === "system") continue; // 系统消息不展示
+
+        if (m.role === "assistant") {
+          // assistant 可能有 tool_calls（content 为 null）
+          if (m.tool_calls && !m.content) continue; // 纯 tool_call carrier，跳过
+          uiMessages.push({
+            role: "assistant",
+            content: typeof m.content === "string" ? m.content : "",
+          });
+        } else if (m.role === "tool") {
+          uiMessages.push({
+            role: "tool",
+            content: typeof m.content === "string"
+              ? m.content.slice(0, 80)
+              : "(工具调用)",
+            toolName: m.tool_call_id ? `call_${m.tool_call_id.slice(0, 8)}` : "tool",
+          });
+        } else if (m.role === "user") {
+          uiMessages.push({
+            role: "user",
+            content: typeof m.content === "string" ? m.content : "",
+          });
+        }
+      }
 
       setMessages(uiMessages);
       setStatusLine(`已恢复: ${session.title}`);
@@ -257,6 +289,7 @@ export function App({ apiKey, baseURL, model }: AppProps) {
   const handleDeleteSession = useCallback(
     (sessionId: string) => {
       sessionManager.delete(sessionId);
+      setSessions(sessionManager.list());
       setStatusLine("会话已删除");
     },
     [sessionManager]
@@ -270,7 +303,7 @@ export function App({ apiKey, baseURL, model }: AppProps) {
   if (viewMode === "sessions") {
     return (
       <SessionList
-        sessions={sessionManager.list()}
+        sessions={sessions}
         onResume={handleResumeSession}
         onDelete={handleDeleteSession}
         onBack={handleBackToChat}
@@ -284,6 +317,7 @@ export function App({ apiKey, baseURL, model }: AppProps) {
       {pendingPermission && (
         <PermissionPrompt
           message={pendingPermission.approvalMessage}
+          dangerous={isDangerousTool(pendingPermission.toolName)}
           onApprove={handlePermissionApprove}
           onDeny={handlePermissionDeny}
         />

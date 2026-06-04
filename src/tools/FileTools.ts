@@ -1,12 +1,12 @@
 import { z } from "zod";
-import { Tool, type ToolResult, type PermissionLevel } from "../Tool";
+import { Tool, type ToolResult } from "../Tool";
 import * as fs from "fs";
 import * as path from "path";
 
 export class ReadTool extends Tool {
   name = "read_file";
   description = "读取指定文件的内容。支持指定行号范围。";
-  permission: PermissionLevel = "allow";
+  permission = "allow" as const;
 
   inputSchema = z.object({
     filePath: z.string().describe("文件绝对路径"),
@@ -56,7 +56,7 @@ const WRITE_SCHEMA = z.object({
 export class WriteTool extends Tool<typeof WRITE_SCHEMA> {
   name = "write_to_file";
   description = "创建或覆盖写入文件。会覆盖已有文件的全部内容。";
-  permission: PermissionLevel = "ask";
+  permission = "ask" as const;
 
   inputSchema = WRITE_SCHEMA;
 
@@ -90,7 +90,7 @@ export class EditTool extends Tool<typeof EDIT_SCHEMA> {
   name = "edit_file";
   description =
     "精确替换文件中的文本。oldString 必须完全匹配文件中唯一出现的片段。";
-  permission: PermissionLevel = "ask";
+  permission = "ask" as const;
 
   inputSchema = EDIT_SCHEMA;
 

@@ -18,10 +18,12 @@ if (args.includes("--help") || args.includes("-h")) {
       "ttcode — AI coding assistant for your terminal",
       "",
       "Usage:",
-      "  ttcode              Launch interactive TUI",
-      "  ttcode -p <task>    Run a task directly (non-interactive)",
-      "  ttcode --version    Print version",
-      "  ttcode --help       Show this help",
+      "  ttcode                                     Launch interactive TUI",
+      "  ttcode -p <task>                           Run a task (read/grep only)",
+      "  ttcode -p <task> --allow-tools edit,write  Allow specific tools",
+      "  ttcode -p <task> --dangerously-auto-approve Allow ALL tools",
+      "  ttcode --version                           Print version",
+      "  ttcode --help                              Show this help",
       "",
       "Configuration:",
       "  Set DEEPSEEK_API_KEY environment variable.",
@@ -61,7 +63,14 @@ void (async () => {
       process.stderr.write("❌ -p 参数后需要提供任务描述\n");
       process.exit(1);
     }
-    await runNonInteractive(task, { apiKey, baseURL, model });
+    // 解析允许的工具
+    const allowToolsIdx = args.indexOf("--allow-tools");
+    const allowedTools: string[] = [];
+    if (allowToolsIdx !== -1 && allowToolsIdx + 1 < args.length) {
+      allowedTools.push(...args[allowToolsIdx + 1].split(",").map((s) => s.trim()));
+    }
+    const dangerouslyApprove = args.includes("--dangerously-auto-approve");
+    await runNonInteractive(task, { apiKey, baseURL, model, allowedTools, dangerouslyApprove });
   } else {
     const app = await import("./ui/App");
     void app.renderApp({ apiKey, baseURL, model });
@@ -70,7 +79,13 @@ void (async () => {
 
 async function runNonInteractive(
   task: string,
-  opts: { apiKey: string; baseURL: string; model: string }
+  opts: {
+    apiKey: string;
+    baseURL: string;
+    model: string;
+    allowedTools: string[];
+    dangerouslyApprove: boolean;
+  }
 ): Promise<void> {
   const { LLMClient } = await import("./client");
   const { Agent } = await import("./Agent");
@@ -79,7 +94,10 @@ async function runNonInteractive(
   const client = new LLMClient(opts);
   const agent = new Agent({
     client,
-    permissionResolver: new AutoAllowResolver(),
+    permissionResolver: new AutoAllowResolver(
+      opts.allowedTools,
+      opts.dangerouslyApprove
+    ),
   });
 
   process.stdout.write(`⏳ ${task.slice(0, 60)}...\n\n`);

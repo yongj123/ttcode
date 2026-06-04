@@ -25,27 +25,45 @@ export interface PermissionResolver {
 }
 
 /**
- * 自动放行解析器（非交互模式）。
- * allow → 放行，ask/deny → 拒绝。
+ * 非交互模式解析器。
+ * @param allowedTools 指定允许的 ask 级别工具名列表（空 = allow级别放行，ask/deny拒绝）
+ * @param dangerousAutoApprove 是否对所有 ask 工具自动批准
  */
 export class AutoAllowResolver implements PermissionResolver {
+  private allowedTools: Set<string>;
+  private autoApproveAll: boolean;
+
+  constructor(allowedTools: string[] = [], autoApproveAll = false) {
+    this.allowedTools = new Set(allowedTools);
+    this.autoApproveAll = autoApproveAll;
+  }
+
   async resolve(tool: Tool, _input: unknown): Promise<PermissionDecision> {
     if (tool.permission === "deny") {
       return { allowed: false, reason: `工具 ${tool.name} 已被禁止使用` };
     }
-    if (tool.permission === "ask") {
-      return {
-        allowed: false,
-        reason: `非交互模式下，需要确认的工具 ${tool.name} 自动跳过`,
-      };
+    if (tool.permission === "allow") {
+      return { allowed: true };
     }
-    return { allowed: true };
+    // ask 级别
+    if (this.autoApproveAll) {
+      return { allowed: true };
+    }
+    if (this.allowedTools.has(tool.name)) {
+      return { allowed: true };
+    }
+    return {
+      allowed: false,
+      reason: `非交互模式下，工具 ${tool.name} 需要 --allow-tools 或 --dangerously-auto-approve 标志`,
+    };
   }
 }
 
 /**
  * 交互模式解析器。
- * 通过回调将确认请求交给 UI 层处理。
+ * - 通过 onPending 回调通知 UI 弹出确认框（事件驱动）
+ * - cancel() 释放所有等待中的 promise（Esc 取消时调用）
+ * - deny 级别直接拒，allow 级别自动放
  */
 export class InteractiveResolver implements PermissionResolver {
   private pending:
@@ -56,48 +74,47 @@ export class InteractiveResolver implements PermissionResolver {
       }
     | null = null;
 
-  /**
-   * 等待权限决策。
-   * UI 层调用此方法弹出确认框。
-   */
+  /** 当新权限请求待确认时回调（事件驱动）。参数: approvalMessage, toolName */
+  onPending: ((msg: string, toolName: string) => void) | null = null;
+
   async resolve(
     tool: Tool,
     input: unknown
   ): Promise<PermissionDecision> {
-    // deny 级别直接拒绝，不需要用户确认
     if (tool.permission === "deny") {
-      return {
-        allowed: false,
-        reason: `工具 ${tool.name} 已被禁止使用`,
-      };
+      return { allowed: false, reason: `工具 ${tool.name} 已被禁止使用` };
     }
 
-    // allow 级别自动放行
     if (tool.permission === "allow") {
       return { allowed: true };
     }
 
-    // ask 级别 → 弹出确认框
     const approvalMessage = tool.getApprovalMessage(input);
 
     return new Promise<PermissionDecision>((resolve) => {
       this.pending = { resolve, tool, approvalMessage };
+      // 事件驱动：立即通知 UI
+      this.onPending?.(approvalMessage, tool.name);
     });
   }
 
-  /** 获取当前等待确认的请求（UI 层调用） */
+  /** 取消所有待确认请求（任务被中止时调用） */
+  cancel(): void {
+    if (this.pending) {
+      const { resolve } = this.pending;
+      this.pending = null;
+      resolve({ allowed: false, reason: "任务已取消" });
+    }
+  }
+
   getPending(): {
     tool: Tool;
     approvalMessage: string;
   } | null {
     if (!this.pending) return null;
-    return {
-      tool: this.pending.tool,
-      approvalMessage: this.pending.approvalMessage,
-    };
+    return { tool: this.pending.tool, approvalMessage: this.pending.approvalMessage };
   }
 
-  /** 用户确认通过 */
   approve(): void {
     if (this.pending) {
       const { resolve } = this.pending;
@@ -106,15 +123,11 @@ export class InteractiveResolver implements PermissionResolver {
     }
   }
 
-  /** 用户拒绝 */
   deny(reason?: string): void {
     if (this.pending) {
       const { resolve, approvalMessage } = this.pending;
       this.pending = null;
-      resolve({
-        allowed: false,
-        reason: reason || `用户拒绝了 ${approvalMessage}`,
-      });
+      resolve({ allowed: false, reason: reason || `用户拒绝了 ${approvalMessage}` });
     }
   }
 }

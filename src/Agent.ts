@@ -59,16 +59,24 @@ export class Agent {
   }
 
   /**
-   * 流式执行用户消息。
+   * 执行用户消息。
+   * 如果已有历史消息（session恢复后或多轮对话），则追加到末尾；
+   * 否则重新初始化 system + user。
    */
   async *run(
     userMessage: string,
     signal?: AbortSignal
   ): AsyncGenerator<AgentEvent> {
-    this.messages = [
-      { role: "system", content: this.systemPrompt },
-      { role: "user", content: userMessage },
-    ];
+    if (this.messages.length === 0) {
+      // 全新对话：初始化 system + user
+      this.messages = [
+        { role: "system", content: this.systemPrompt },
+        { role: "user", content: userMessage },
+      ];
+    } else {
+      // 多轮对话 / session 恢复：追加 user 消息
+      this.messages.push({ role: "user", content: userMessage });
+    }
     yield* this.agentLoop(signal);
   }
 
@@ -186,7 +194,7 @@ export class Agent {
           continue;
         }
 
-        // ---- 执行工具 ----
+        // ---- 执行工具（兜底 catch，单工具失败不中断循环） ----
         let input: unknown;
         try {
           input = JSON.parse(tc.arguments);
@@ -196,9 +204,18 @@ export class Agent {
 
         yield { type: "tool_call_start", toolName: tc.name, toolInput: input };
 
-        const result = await tool.execute(input);
-        this.messages.push(createToolResultMessage(tc.id, result));
+        let result: ToolResult;
+        try {
+          result = await tool.execute(input);
+        } catch (err) {
+          result = {
+            ok: false,
+            llmContent: `工具执行异常: ${err instanceof Error ? err.message : String(err)}`,
+            userSummary: `${tc.name}: 执行异常`,
+          };
+        }
 
+        this.messages.push(createToolResultMessage(tc.id, result));
         yield {
           type: "tool_call_result",
           toolName: tc.name,
