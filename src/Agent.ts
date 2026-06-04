@@ -1,7 +1,7 @@
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import { LLMClient, type ToolCall } from "./client";
 import { createTools, getToolDefinitions, findTool } from "./tools";
-import { TodoStore } from "./tools/TodoTools";
+import { TodoStore, type TodoItem } from "./tools/TodoTools";
 import { MemoryManager, type ConversationSummary } from "./memory/MemoryManager";
 import type { Tool } from "./Tool";
 import type { ToolResult } from "./Tool";
@@ -296,6 +296,10 @@ export class Agent {
     this.usage = { input: 0, output: 0 };
     this.summary = undefined;
     this.todoStore.replace([]);
+  }
+
+  getTodos(): TodoItem[] {
+    return this.todoStore.list();
   }
 
   getUsage(): { input: number; output: number } {

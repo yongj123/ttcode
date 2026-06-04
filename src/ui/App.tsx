@@ -5,11 +5,13 @@ import { Agent } from "../Agent";
 import { ChatView } from "./ChatView";
 import { MessageLine } from "./MessageLine";
 import { InputBox } from "./InputBox";
+import { TodoListView } from "./TodoListView";
 import { PermissionPrompt } from "./PermissionPrompt";
 import { SessionList } from "./SessionList";
 import { SessionManager } from "../session";
 import { InteractiveResolver } from "../permission";
 import type { ToolResult } from "../Tool";
+import type { TodoItem } from "../tools/TodoTools";
 
 export interface ChatMessage {
   role: "user" | "assistant" | "system" | "tool";
@@ -38,6 +40,7 @@ export function App({ apiKey, baseURL, model }: AppProps) {
   const [staticMessages, setStaticMessages] = useState<ChatMessage[]>([]);
   const [busy, setBusy] = useState(false);
   const [statusLine, setStatusLine] = useState("");
+  const [todos, setTodos] = useState<TodoItem[]>([]);
   const [viewMode, setViewMode] = useState<ViewMode>("chat");
   const [sessions, setSessions] = useState<ReturnType<typeof SessionManager.prototype.list>>([]);
   const { exit } = useApp();
@@ -166,6 +169,10 @@ export function App({ apiKey, baseURL, model }: AppProps) {
                   toolResult: event.toolResult,
                 },
               ]);
+              // 同步任务列表到 UI
+              if (event.toolName === "todo_write" || event.toolName === "todo_read") {
+                setTodos(agentRef.current?.getTodos() ?? []);
+              }
               break;
 
             case "tool_permission_denied":
@@ -257,12 +264,14 @@ export function App({ apiKey, baseURL, model }: AppProps) {
         case "/clear":
           setMessages([]);
           setStaticMessages([]);
+          setTodos([]);
           agentRef.current?.reset();
           sessionManager.create();
           break;
         case "/new":
           setMessages([]);
           setStaticMessages([]);
+          setTodos([]);
           agentRef.current?.reset();
           sessionManager.create();
           setStatusLine("新对话已创建");
@@ -394,6 +403,8 @@ export function App({ apiKey, baseURL, model }: AppProps) {
           showEmptyState={staticMessages.length === 0}
         />
       </Box>
+
+      <TodoListView todos={todos} />
 
       <Box
         flexDirection="column"
