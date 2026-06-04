@@ -1,10 +1,8 @@
 #!/usr/bin/env bun
 /**
  * ttcode CLI 入口。
- * 对标 deepcode-cli 的 cli.tsx / Claude Code 的 main.tsx。
+ * UI 模块使用动态 import，避免非交互模式下加载 Ink。
  */
-
-import { renderApp } from "./ui/App";
 
 const args = process.argv.slice(2);
 
@@ -32,6 +30,8 @@ if (args.includes("--help") || args.includes("-h")) {
       "  Enter     Send message",
       "  Esc       Cancel current task",
       "  /clear    Clear conversation",
+      "  /new      Start fresh session",
+      "  /sessions List & resume past sessions",
       "  /exit     Quit",
     ].join("\n") + "\n"
   );
@@ -50,21 +50,23 @@ if (!apiKey) {
 const baseURL = process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com";
 const model = process.env.DEEPSEEK_MODEL || "deepseek-v4-pro";
 
-// 非交互模式：-p/--prompt 参数直接执行任务
-const promptIndex = args.findIndex(
-  (a) => a === "-p" || a === "--prompt"
-);
-if (promptIndex !== -1) {
-  const task = args[promptIndex + 1];
-  if (!task) {
-    process.stderr.write("❌ -p 参数后需要提供任务描述\n");
-    process.exit(1);
+// 按模式选择入口
+void (async () => {
+  const promptIndex = args.findIndex(
+    (a) => a === "-p" || a === "--prompt"
+  );
+  if (promptIndex !== -1) {
+    const task = args[promptIndex + 1];
+    if (!task) {
+      process.stderr.write("❌ -p 参数后需要提供任务描述\n");
+      process.exit(1);
+    }
+    await runNonInteractive(task, { apiKey, baseURL, model });
+  } else {
+    const app = await import("./ui/App");
+    void app.renderApp({ apiKey, baseURL, model });
   }
-  runNonInteractive(task, { apiKey, baseURL, model });
-} else {
-  // 交互模式
-  void renderApp({ apiKey, baseURL, model });
-}
+})();
 
 async function runNonInteractive(
   task: string,
@@ -72,9 +74,13 @@ async function runNonInteractive(
 ): Promise<void> {
   const { LLMClient } = await import("./client");
   const { Agent } = await import("./Agent");
+  const { AutoAllowResolver } = await import("./permission");
 
   const client = new LLMClient(opts);
-  const agent = new Agent({ client });
+  const agent = new Agent({
+    client,
+    permissionResolver: new AutoAllowResolver(),
+  });
 
   process.stdout.write(`⏳ ${task.slice(0, 60)}...\n\n`);
 
@@ -95,6 +101,11 @@ async function runNonInteractive(
               `📦 ${event.toolResult.userSummary}\n`
             );
           }
+          break;
+        case "tool_permission_denied":
+          process.stdout.write(
+            `\n🚫 ${event.toolName}: ${event.content || "已拒绝"}\n`
+          );
           break;
         case "error":
           process.stderr.write(`\n❌ ${event.content}\n`);

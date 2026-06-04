@@ -2,22 +2,32 @@ import type { ChatCompletionMessageParam } from "openai/resources/chat/completio
 import { LLMClient, type ToolCall } from "./client";
 import { getToolDefinitions, findTool } from "./tools";
 import type { ToolResult } from "./Tool";
+import {
+  type PermissionResolver,
+  createDeniedToolMessage,
+  createToolResultMessage,
+} from "./permission";
 
 export interface AgentConfig {
   client: LLMClient;
   maxTurns?: number;
   systemPrompt?: string;
+  /** 权限解析器。不传则默认所有工具自动放行。 */
+  permissionResolver?: PermissionResolver;
 }
 
+export type AgentEventType =
+  | "thinking"
+  | "text"
+  | "tool_call_start"
+  | "tool_call_result"
+  | "tool_permission_denied"
+  | "turn_end"
+  | "done"
+  | "error";
+
 export interface AgentEvent {
-  type:
-    | "thinking"
-    | "text"
-    | "tool_call_start"
-    | "tool_call_result"
-    | "turn_end"
-    | "done"
-    | "error";
+  type: AgentEventType;
   content?: string;
   toolName?: string;
   toolInput?: unknown;
@@ -27,13 +37,17 @@ export interface AgentEvent {
 
 /**
  * ReAct Agent 循环。
- * 对标 Claude Code QueryEngine：
- *   system → user → LLM → (tool_call → execute → 喂回)* → 回复
+ *
+ * 权限流程：
+ *   tool_call → resolvePermission() →
+ *     ├── allowed  → execute → tool_result 喂回 LLM
+ *     └── denied   → tool_permission_denied → 拒绝信息喂回 LLM（让它换方案）
  */
 export class Agent {
   private client: LLMClient;
   private maxTurns: number;
   private systemPrompt: string;
+  private permissionResolver?: PermissionResolver;
   private messages: ChatCompletionMessageParam[] = [];
   private usage = { input: 0, output: 0 };
 
@@ -41,11 +55,11 @@ export class Agent {
     this.client = config.client;
     this.maxTurns = config.maxTurns ?? 20;
     this.systemPrompt = config.systemPrompt ?? this.defaultSystemPrompt();
+    this.permissionResolver = config.permissionResolver;
   }
 
   /**
-   * 流式执行任务。通过 AsyncGenerator 逐步产出事件，
-   * UI 层可以逐事件消费来渲染。
+   * 流式执行用户消息。
    */
   async *run(
     userMessage: string,
@@ -55,7 +69,27 @@ export class Agent {
       { role: "system", content: this.systemPrompt },
       { role: "user", content: userMessage },
     ];
+    yield* this.agentLoop(signal);
+  }
 
+  /**
+   * 从已有消息历史继续执行（用于 session 恢复）。
+   */
+  async *continue(
+    existingMessages: ChatCompletionMessageParam[],
+    signal?: AbortSignal
+  ): AsyncGenerator<AgentEvent> {
+    this.messages = existingMessages;
+    yield* this.agentLoop(signal);
+  }
+
+  // ================================================================
+  // 核心循环
+  // ================================================================
+
+  private async *agentLoop(
+    signal?: AbortSignal
+  ): AsyncGenerator<AgentEvent> {
     for (let turn = 0; turn < this.maxTurns; turn++) {
       yield { type: "thinking", content: `思考中... (第${turn + 1}轮)` };
 
@@ -63,6 +97,7 @@ export class Agent {
       let textContent = "";
       const toolCalls: ToolCall[] = [];
 
+      // ---- 调用 LLM ----
       try {
         for await (const event of this.client.chatStream(
           this.messages,
@@ -97,7 +132,7 @@ export class Agent {
         return;
       }
 
-      // 无工具调用 → 最终回复
+      // ---- 无工具调用 → 最终回复 ----
       if (toolCalls.length === 0) {
         if (textContent) {
           this.messages.push({ role: "assistant", content: textContent });
@@ -106,7 +141,7 @@ export class Agent {
         return;
       }
 
-      // 有工具调用 → 执行
+      // ---- 添加 assistant 消息 ----
       const assistantMsg: ChatCompletionMessageParam = {
         role: "assistant",
         content: textContent || null,
@@ -118,21 +153,40 @@ export class Agent {
       };
       this.messages.push(assistantMsg);
 
+      // ---- 逐工具执行（带权限检查） ----
       for (const tc of toolCalls) {
         const tool = findTool(tc.name);
+
         if (!tool) {
+          const errorResult: ToolResult = {
+            ok: false,
+            llmContent: `未知工具: ${tc.name}`,
+            userSummary: `未知工具: ${tc.name}`,
+          };
+          this.messages.push(createToolResultMessage(tc.id, errorResult));
           yield {
             type: "tool_call_result",
             toolName: tc.name,
-            toolResult: {
-              ok: false,
-              llmContent: `未知工具: ${tc.name}`,
-              userSummary: `未知工具: ${tc.name}`,
-            },
+            toolResult: errorResult,
           };
           continue;
         }
 
+        // ---- 权限检查 ----
+        const decision = await this.checkPermission(tool, tc.arguments);
+
+        if (!decision.allowed) {
+          const reason = decision.reason || "权限不足";
+          yield {
+            type: "tool_permission_denied",
+            toolName: tc.name,
+            content: reason,
+          };
+          this.messages.push(createDeniedToolMessage(tc.id, reason));
+          continue;
+        }
+
+        // ---- 执行工具 ----
         let input: unknown;
         try {
           input = JSON.parse(tc.arguments);
@@ -140,25 +194,16 @@ export class Agent {
           input = {};
         }
 
-        yield {
-          type: "tool_call_start",
-          toolName: tc.name,
-          toolInput: input,
-        };
+        yield { type: "tool_call_start", toolName: tc.name, toolInput: input };
 
         const result = await tool.execute(input);
+        this.messages.push(createToolResultMessage(tc.id, result));
 
         yield {
           type: "tool_call_result",
           toolName: tc.name,
           toolResult: result,
         };
-
-        this.messages.push({
-          role: "tool",
-          tool_call_id: tc.id,
-          content: result.llmContent,
-        });
       }
     }
 
@@ -168,21 +213,53 @@ export class Agent {
     };
   }
 
-  /** 获取对话历史 */
+  // ================================================================
+  // 权限
+  // ================================================================
+
+  private async checkPermission(
+    tool: import("./Tool").Tool,
+    rawArgs: string
+  ): Promise<{ allowed: boolean; reason?: string }> {
+    if (!this.permissionResolver) {
+      return { allowed: true };
+    }
+
+    let input: unknown;
+    try {
+      input = JSON.parse(rawArgs);
+    } catch {
+      input = {};
+    }
+
+    const decision = await this.permissionResolver.resolve(tool, input);
+    return decision;
+  }
+
+  // ================================================================
+  // 状态管理
+  // ================================================================
+
   getMessages(): ChatCompletionMessageParam[] {
     return [...this.messages];
   }
 
-  /** 重置对话 */
+  setMessages(messages: ChatCompletionMessageParam[]): void {
+    this.messages = messages;
+  }
+
   reset(): void {
     this.messages = [];
     this.usage = { input: 0, output: 0 };
   }
 
-  /** 获取 token 用量 */
   getUsage(): { input: number; output: number } {
     return { ...this.usage };
   }
+
+  // ================================================================
+  // 系统提示词
+  // ================================================================
 
   private defaultSystemPrompt(): string {
     return `你是一个专业的编程助手 ttcode，运行在用户的终端中。
@@ -197,7 +274,8 @@ export class Agent {
 1. KISS — Keep It Simple, Stupid。优先选择最简单的方案。
 2. 先读后改 — 编辑文件前先读取确认当前内容。
 3. 精确编辑 — 使用 edit_file 时 oldString 必须与文件内容完全匹配。
-4. 完成后总结 — 任务完成时给用户简洁的总结。
+4. 如果某个工具被权限拒绝，尝试用其他可用的方法完成任务。
+5. 完成后总结 — 任务完成时给用户简洁的总结。
 
 回复风格：
 - 使用中文
