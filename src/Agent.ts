@@ -1,6 +1,9 @@
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import { LLMClient, type ToolCall } from "./client";
-import { getToolDefinitions, findTool } from "./tools";
+import { createTools, getToolDefinitions, findTool } from "./tools";
+import { TodoStore } from "./tools/TodoTools";
+import { MemoryManager, type ConversationSummary } from "./memory/MemoryManager";
+import type { Tool } from "./Tool";
 import type { ToolResult } from "./Tool";
 import {
   type PermissionResolver,
@@ -50,12 +53,18 @@ export class Agent {
   private permissionResolver?: PermissionResolver;
   private messages: ChatCompletionMessageParam[] = [];
   private usage = { input: 0, output: 0 };
+  private todoStore = new TodoStore();
+  private tools: Tool[];
+  private memoryManager: MemoryManager;
+  private summary?: ConversationSummary;
 
   constructor(config: AgentConfig) {
     this.client = config.client;
     this.maxTurns = config.maxTurns ?? 20;
     this.systemPrompt = config.systemPrompt ?? this.defaultSystemPrompt();
     this.permissionResolver = config.permissionResolver;
+    this.tools = createTools({ todoStore: this.todoStore });
+    this.memoryManager = new MemoryManager(this.client);
   }
 
   /**
@@ -101,14 +110,14 @@ export class Agent {
     for (let turn = 0; turn < this.maxTurns; turn++) {
       yield { type: "thinking", content: `思考中... (第${turn + 1}轮)` };
 
-      const tools = getToolDefinitions();
+      const tools = getToolDefinitions(this.tools);
       let textContent = "";
       const toolCalls: ToolCall[] = [];
 
       // ---- 调用 LLM ----
       try {
         for await (const event of this.client.chatStream(
-          this.messages,
+          this.memoryManager.buildRuntimeMessages(this.messages, this.summary),
           tools,
           signal
         )) {
@@ -145,6 +154,7 @@ export class Agent {
         if (textContent) {
           this.messages.push({ role: "assistant", content: textContent });
         }
+        await this.compactIfNeeded();
         yield { type: "done", usage: this.usage };
         return;
       }
@@ -163,7 +173,7 @@ export class Agent {
 
       // ---- 逐工具执行（带权限检查） ----
       for (const tc of toolCalls) {
-        const tool = findTool(tc.name);
+        const tool = findTool(tc.name, this.tools);
 
         if (!tool) {
           const errorResult: ToolResult = {
@@ -261,6 +271,22 @@ export class Agent {
     return [...this.messages];
   }
 
+  getSummary(): ConversationSummary | undefined {
+    return this.summary ? { ...this.summary } : undefined;
+  }
+
+  setSummary(summary?: ConversationSummary): void {
+    this.summary = summary;
+  }
+
+  async compactNow(): Promise<ConversationSummary | undefined> {
+    const result = await this.memoryManager.compact(this.messages, this.summary);
+    if (!result) return this.summary;
+    this.summary = result.summary;
+    this.messages = result.messages;
+    return this.getSummary();
+  }
+
   setMessages(messages: ChatCompletionMessageParam[]): void {
     this.messages = messages;
   }
@@ -268,10 +294,21 @@ export class Agent {
   reset(): void {
     this.messages = [];
     this.usage = { input: 0, output: 0 };
+    this.summary = undefined;
+    this.todoStore.replace([]);
   }
 
   getUsage(): { input: number; output: number } {
     return { ...this.usage };
+  }
+
+  private async compactIfNeeded(): Promise<void> {
+    if (!this.memoryManager.shouldCompact(this.messages)) return;
+    try {
+      await this.compactNow();
+    } catch {
+      // 摘要压缩是上下文优化，失败不应影响当前任务完成。
+    }
   }
 
   // ================================================================
@@ -286,13 +323,17 @@ export class Agent {
 - 创建和编辑文件
 - 执行 shell 命令
 - 搜索代码库
+- 使用 todo_write / todo_read 拆分任务并持续跟踪进度
 
 工作原则：
 1. KISS — Keep It Simple, Stupid。优先选择最简单的方案。
 2. 先读后改 — 编辑文件前先读取确认当前内容。
 3. 精确编辑 — 使用 edit_file 时 oldString 必须与文件内容完全匹配。
-4. 如果某个工具被权限拒绝，尝试用其他可用的方法完成任务。
-5. 完成后总结 — 任务完成时给用户简洁的总结。
+4. 任务拆分 — 多步骤任务、调试任务、包含“并且/然后/同时/顺便”等要求的任务，必须先使用 todo_write 创建任务列表。
+5. 持续反馈 — 开始某个任务前，将它标记为 in_progress；完成后立即标记为 completed；任务变化时调用 todo_write 更新完整列表。
+6. Plan + Act — 复杂、高风险、跨模块或不确定的任务，先给出计划并等待用户确认；简单任务可直接拆分 todo 后执行。
+7. 如果某个工具被权限拒绝，尝试用其他可用的方法完成任务。
+8. 完成后总结 — 任务完成时给用户简洁的总结。
 
 回复风格：
 - 使用中文

@@ -3,6 +3,7 @@ import * as path from "path";
 import * as os from "os";
 import { randomUUID } from "crypto";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
+import type { ConversationSummary } from "./memory/MemoryManager";
 
 // ================================================================
 // 类型定义
@@ -22,6 +23,7 @@ export interface SessionData {
   createTime: string;
   updateTime: string;
   messages: ChatCompletionMessageParam[];
+  summary?: ConversationSummary;
 }
 
 // ================================================================
@@ -136,6 +138,23 @@ export class SessionManager {
   updateMessages(messages: ChatCompletionMessageParam[]): void {
     if (this.currentSession) {
       this.currentSession.messages = messages;
+      this.save(this.currentSession);
+    }
+  }
+
+  /** 更新当前会话的压缩摘要 */
+  updateSummary(summary?: ConversationSummary): void {
+    if (this.currentSession) {
+      this.currentSession.summary = summary;
+      this.save(this.currentSession);
+    }
+  }
+
+  /** 同时更新当前会话的 messages 与压缩摘要 */
+  updateMemory(messages: ChatCompletionMessageParam[], summary?: ConversationSummary): void {
+    if (this.currentSession) {
+      this.currentSession.messages = messages;
+      this.currentSession.summary = summary;
       this.save(this.currentSession);
     }
   }

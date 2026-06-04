@@ -191,7 +191,7 @@ export function App({ apiKey, baseURL, model }: AppProps) {
               }
               // 持久化
               const msgs = agent.getMessages();
-              sessionManager.updateMessages(msgs);
+              sessionManager.updateMemory(msgs, agent.getSummary());
               break;
             }
 
@@ -221,6 +221,31 @@ export function App({ apiKey, baseURL, model }: AppProps) {
     setPendingPermission(null);
   }, [permissionResolver]);
 
+  const handleCompact = useCallback(async () => {
+    if (busyRef.current) {
+      setStatusLine("任务执行中，暂不能压缩上下文");
+      return;
+    }
+
+    const agent = agentRef.current;
+    if (!agent) return;
+
+    busyRef.current = true;
+    setBusy(true);
+    setStatusLine("正在压缩上下文...");
+
+    try {
+      const summary = await agent.compactNow();
+      sessionManager.updateMemory(agent.getMessages(), summary);
+      setStatusLine(summary ? "上下文已压缩" : "当前上下文无需压缩");
+    } catch (err) {
+      setStatusLine(`压缩失败: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  }, [sessionManager]);
+
   // ---- 命令 ----
   const handleCommand = useCallback(
     (cmd: string) => {
@@ -247,11 +272,14 @@ export function App({ apiKey, baseURL, model }: AppProps) {
           setSessions(sessionManager.list());
           setViewMode("sessions");
           break;
+        case "/compact":
+          void handleCompact();
+          break;
         default:
           setStatusLine(`未知命令: ${cmd}`);
       }
     },
-    [exit, sessionManager]
+    [exit, sessionManager, handleCompact]
   );
 
   // ---- Session 恢复 ----
@@ -265,6 +293,7 @@ export function App({ apiKey, baseURL, model }: AppProps) {
 
       setViewMode("chat");
       agentRef.current!.setMessages(session.messages);
+      agentRef.current!.setSummary(session.summary);
 
       // 建立 tool_call_id → function.name 映射
       const toolNameMap = new Map<string, string>();

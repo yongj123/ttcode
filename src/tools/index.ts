@@ -1,26 +1,38 @@
 import type { Tool } from "../Tool";
 import { ReadTool, WriteTool, EditTool } from "./FileTools";
 import { BashTool, GrepTool } from "./BashAndGrep";
+import { TodoReadTool, TodoStore, TodoWriteTool } from "./TodoTools";
 
-const toolList: Tool[] = [
-  new ReadTool(),
-  new WriteTool(),
-  new EditTool(),
-  new BashTool(),
-  new GrepTool(),
-];
+export interface ToolContext {
+  todoStore?: TodoStore;
+}
+
+export function createTools(context: ToolContext = {}): Tool[] {
+  const todoStore = context.todoStore ?? new TodoStore();
+  return [
+    new ReadTool(),
+    new WriteTool(),
+    new EditTool(),
+    new BashTool(),
+    new GrepTool(),
+    new TodoWriteTool(todoStore),
+    new TodoReadTool(todoStore),
+  ];
+}
+
+const defaultTools = createTools();
 
 /** 获取所有已注册的工具 */
 export function getTools(): Tool[] {
-  return toolList;
+  return defaultTools;
 }
 
 /** 按名称查找工具 */
-export function findTool(name: string): Tool | undefined {
-  return toolList.find((t) => t.name === name);
+export function findTool(name: string, tools: Tool[] = defaultTools): Tool | undefined {
+  return tools.find((t) => t.name === name);
 }
 
 /** 生成所有工具的 OpenAI function calling definitions */
-export function getToolDefinitions(): object[] {
-  return toolList.map((t) => t.toOpenAITool());
+export function getToolDefinitions(tools: Tool[] = defaultTools): object[] {
+  return tools.map((t) => t.toOpenAITool());
 }
