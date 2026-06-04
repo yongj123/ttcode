@@ -76,12 +76,8 @@ export function App({ apiKey, baseURL, model }: AppProps) {
       // 释放权限等待（防止 generator 悬挂）
       permissionResolver.cancel();
       setPendingPermission(null);
-      // 保存当前消息
-      const agent = agentRef.current!;
-      const currentMessages = agent.getMessages();
-      if (currentMessages.length > 0) {
-        sessionManager.updateMessages(currentMessages);
-      }
+      // 不保存 in-flight 消息 —— 可能包含未闭合的 tool_calls，
+      // 恢复时会导致 API 报错。下次正常完成时再保存。
     }
   });
 
@@ -252,25 +248,39 @@ export function App({ apiKey, baseURL, model }: AppProps) {
       setViewMode("chat");
       agentRef.current!.setMessages(session.messages);
 
+      // 建立 tool_call_id → function.name 映射
+      const toolNameMap = new Map<string, string>();
+      for (const m of session.messages) {
+        if (m.role === "assistant" && m.tool_calls) {
+          for (const tc of m.tool_calls) {
+            if (tc.id && "function" in tc && tc.function?.name) {
+              toolNameMap.set(tc.id, tc.function.name);
+            }
+          }
+        }
+      }
+
       // 转换 ChatCompletionMessageParam → ChatMessage（用于 UI 展示）
       const uiMessages: ChatMessage[] = [];
       for (const m of session.messages) {
-        if (m.role === "system") continue; // 系统消息不展示
+        if (m.role === "system") continue;
 
         if (m.role === "assistant") {
-          // assistant 可能有 tool_calls（content 为 null）
-          if (m.tool_calls && !m.content) continue; // 纯 tool_call carrier，跳过
+          if (m.tool_calls && !m.content) continue;
           uiMessages.push({
             role: "assistant",
             content: typeof m.content === "string" ? m.content : "",
           });
         } else if (m.role === "tool") {
+          const realName = m.tool_call_id
+            ? toolNameMap.get(m.tool_call_id)
+            : undefined;
           uiMessages.push({
             role: "tool",
             content: typeof m.content === "string"
               ? m.content.slice(0, 80)
               : "(工具调用)",
-            toolName: m.tool_call_id ? `call_${m.tool_call_id.slice(0, 8)}` : "tool",
+            toolName: realName || (m.tool_call_id ? `${m.tool_call_id.slice(0, 8)}` : "tool"),
           });
         } else if (m.role === "user") {
           uiMessages.push({

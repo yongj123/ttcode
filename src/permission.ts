@@ -25,8 +25,23 @@ export interface PermissionResolver {
 }
 
 /**
+ * 工具名别名映射。
+ * 用户可以用简短的别名，映射到真实的 tool.name。
+ */
+const TOOL_ALIASES: Record<string, string> = {
+  edit: "edit_file",
+  write: "write_to_file",
+  read: "read_file",
+  bash: "execute_command",
+  shell: "execute_command",
+  cmd: "execute_command",
+  grep: "search_code",
+  search: "search_code",
+};
+
+/**
  * 非交互模式解析器。
- * @param allowedTools 指定允许的 ask 级别工具名列表（空 = allow级别放行，ask/deny拒绝）
+ * @param allowedTools 用户指定的工具名（支持别名）
  * @param dangerousAutoApprove 是否对所有 ask 工具自动批准
  */
 export class AutoAllowResolver implements PermissionResolver {
@@ -34,7 +49,13 @@ export class AutoAllowResolver implements PermissionResolver {
   private autoApproveAll: boolean;
 
   constructor(allowedTools: string[] = [], autoApproveAll = false) {
-    this.allowedTools = new Set(allowedTools);
+    // 展开别名：edit → edit_file, write → write_to_file 等
+    const expanded = new Set<string>();
+    for (const t of allowedTools) {
+      const real = TOOL_ALIASES[t] || t;
+      expanded.add(real);
+    }
+    this.allowedTools = expanded;
     this.autoApproveAll = autoApproveAll;
   }
 
