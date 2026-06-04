@@ -1,8 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import { render, Box, Text, useInput, useApp, useStdout, Static } from "ink";
+import { render, Box, Text, useInput, useApp, useStdout } from "ink";
 import { LLMClient } from "../client";
 import { Agent } from "../Agent";
-import { ChatView } from "./ChatView";
 import { MessageLine } from "./MessageLine";
 import { InputBox } from "./InputBox";
 import { TodoListView } from "./TodoListView";
@@ -29,15 +28,13 @@ interface AppProps {
 
 type ViewMode = "chat" | "sessions";
 
-/** Bash/Write/Edit 需要显式确认，不能空输入通过 */
 function isDangerousTool(toolName?: string): boolean {
   if (!toolName) return false;
   return ["execute_command", "write_to_file", "edit_file"].includes(toolName);
 }
 
 export function App({ apiKey, baseURL, model }: AppProps) {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [staticMessages, setStaticMessages] = useState<ChatMessage[]>([]);
+  const [allMessages, setAllMessages] = useState<ChatMessage[]>([]);
   const [busy, setBusy] = useState(false);
   const [statusLine, setStatusLine] = useState("");
   const [todos, setTodos] = useState<TodoItem[]>([]);
@@ -51,10 +48,8 @@ export function App({ apiKey, baseURL, model }: AppProps) {
   const sessionRef = useRef<SessionManager | null>(null);
   const resolverRef = useRef<InteractiveResolver | null>(null);
   const abortRef = useRef<AbortController | null>(null);
-  /** 同步防重入守卫：state 是异步的，ref 可以立即阻断重复调用 */
   const busyRef = useRef(false);
 
-  // ---- 权限确认状态 ----
   const [pendingPermission, setPendingPermission] = useState<{
     approvalMessage: string;
     toolName?: string;
@@ -81,15 +76,11 @@ export function App({ apiKey, baseURL, model }: AppProps) {
       busyRef.current = false;
       setBusy(false);
       setStatusLine("已取消");
-      // 释放权限等待（防止 generator 悬挂）
       permissionResolver.cancel();
       setPendingPermission(null);
-      // 不保存 in-flight 消息 —— 可能包含未闭合的 tool_calls，
-      // 恢复时会导致 API 报错。下次正常完成时再保存。
     }
   });
 
-  // ---- 权限确认：事件驱动（替代轮询） ----
   useEffect(() => {
     permissionResolver.onPending = (msg: string, toolName: string) => {
       setPendingPermission({ approvalMessage: msg, toolName });
@@ -99,7 +90,6 @@ export function App({ apiKey, baseURL, model }: AppProps) {
     };
   }, [permissionResolver]);
 
-  // ---- 初次加载 session 列表 ----
   useEffect(() => {
     setSessions(sessionManager.list());
   }, [sessionManager]);
@@ -109,7 +99,6 @@ export function App({ apiKey, baseURL, model }: AppProps) {
     async (text: string) => {
       if (!text.trim() || busyRef.current) return;
 
-      // 命令处理
       if (text.startsWith("/")) {
         handleCommand(text);
         return;
@@ -119,17 +108,15 @@ export function App({ apiKey, baseURL, model }: AppProps) {
       setBusy(true);
       setStatusLine("");
 
-      // 确保有活跃 session
       if (!sessionManager.getCurrent()) {
         sessionManager.create(text.slice(0, 40));
       } else if (sessionManager.getCurrent()!.messages.length === 0) {
         sessionManager.updateTitle(text.slice(0, 40));
       }
 
-      // 添加用户消息到静态历史区，避免输入框变化时反复重绘历史内容。
+      // 用户消息直接追加到列表
       const userMsg: ChatMessage = { role: "user", content: text };
-      setStaticMessages((prev) => [...prev, userMsg]);
-      setMessages([]);
+      setAllMessages((prev) => [...prev, userMsg]);
 
       abortRef.current = new AbortController();
       const agent = agentRef.current!;
@@ -142,15 +129,16 @@ export function App({ apiKey, baseURL, model }: AppProps) {
           switch (event.type) {
             case "text":
               assistantContent += event.content || "";
-              setMessages((prev) => {
-                const next = [...prev];
-                const last = next[next.length - 1];
-                if (last && last.role === "assistant") {
-                  last.content = assistantContent;
-                } else {
-                  next.push({ role: "assistant", content: assistantContent });
+              // 更新最后一条 assistant，或追加新的
+              setAllMessages((prev) => {
+                const last = prev[prev.length - 1];
+                if (last?.role === "assistant") {
+                  return [
+                    ...prev.slice(0, -1),
+                    { role: "assistant" as const, content: assistantContent },
+                  ];
                 }
-                return next;
+                return [...prev, { role: "assistant", content: assistantContent }];
               });
               break;
 
@@ -160,7 +148,9 @@ export function App({ apiKey, baseURL, model }: AppProps) {
 
             case "tool_call_result":
               setStatusLine("");
-              setStaticMessages((prev) => [
+              // 下一轮 text 独立开始，重置累积
+              assistantContent = "";
+              setAllMessages((prev) => [
                 ...prev,
                 {
                   role: "tool",
@@ -169,7 +159,6 @@ export function App({ apiKey, baseURL, model }: AppProps) {
                   toolResult: event.toolResult,
                 },
               ]);
-              // 同步任务列表到 UI
               if (event.toolName === "todo_write" || event.toolName === "todo_read") {
                 setTodos(agentRef.current?.getTodos() ?? []);
               }
@@ -189,20 +178,21 @@ export function App({ apiKey, baseURL, model }: AppProps) {
               setStatusLine(
                 `✅ 完成 | tokens: ${event.usage?.input ?? 0}→${event.usage?.output ?? 0}`
               );
-              if (assistantContent) {
-                setStaticMessages((prev) => [
-                  ...prev,
-                  { role: "assistant", content: assistantContent },
-                ]);
-                setMessages([]);
-              }
-              // 持久化
+              // 确保最后的 assistant 消息不在列表中以空内容残留
+              setAllMessages((prev) => {
+                const last = prev[prev.length - 1];
+                if (last?.role === "assistant" && !last.content) {
+                  return prev.slice(0, -1);
+                }
+                return prev;
+              });
               const msgs = agent.getMessages();
               sessionManager.updateMemory(msgs, agent.getSummary());
               break;
             }
 
-            case "error":              busyRef.current = false;
+            case "error":
+              busyRef.current = false;
               setBusy(false);
               setStatusLine(`❌ ${event.content}`);
               break;
@@ -233,14 +223,11 @@ export function App({ apiKey, baseURL, model }: AppProps) {
       setStatusLine("任务执行中，暂不能压缩上下文");
       return;
     }
-
     const agent = agentRef.current;
     if (!agent) return;
-
     busyRef.current = true;
     setBusy(true);
     setStatusLine("正在压缩上下文...");
-
     try {
       const summary = await agent.compactNow();
       sessionManager.updateMemory(agent.getMessages(), summary);
@@ -262,19 +249,12 @@ export function App({ apiKey, baseURL, model }: AppProps) {
           exit();
           break;
         case "/clear":
-          setMessages([]);
-          setStaticMessages([]);
-          setTodos([]);
-          agentRef.current?.reset();
-          sessionManager.create();
-          break;
         case "/new":
-          setMessages([]);
-          setStaticMessages([]);
+          setAllMessages([]);
           setTodos([]);
           agentRef.current?.reset();
           sessionManager.create();
-          setStatusLine("新对话已创建");
+          if (cmd === "/new") setStatusLine("新对话已创建");
           break;
         case "/sessions":
         case "/list":
@@ -299,12 +279,10 @@ export function App({ apiKey, baseURL, model }: AppProps) {
         setStatusLine("会话不存在");
         return;
       }
-
       setViewMode("chat");
       agentRef.current!.setMessages(session.messages);
       agentRef.current!.setSummary(session.summary);
 
-      // 建立 tool_call_id → function.name 映射
       const toolNameMap = new Map<string, string>();
       for (const m of session.messages) {
         if (m.role === "assistant" && m.tool_calls) {
@@ -316,11 +294,9 @@ export function App({ apiKey, baseURL, model }: AppProps) {
         }
       }
 
-      // 转换 ChatCompletionMessageParam → ChatMessage（用于 UI 展示）
       const uiMessages: ChatMessage[] = [];
       for (const m of session.messages) {
         if (m.role === "system") continue;
-
         if (m.role === "assistant") {
           if (m.tool_calls && !m.content) continue;
           uiMessages.push({
@@ -346,8 +322,7 @@ export function App({ apiKey, baseURL, model }: AppProps) {
         }
       }
 
-      setStaticMessages(uiMessages);
-      setMessages([]);
+      setAllMessages(uiMessages);
       setStatusLine(`已恢复: ${session.title}`);
     },
     [sessionManager]
@@ -378,9 +353,10 @@ export function App({ apiKey, baseURL, model }: AppProps) {
     );
   }
 
+  const showEmpty = allMessages.length === 0;
+
   return (
     <Box flexDirection="column" height="100%">
-      {/* 权限确认弹窗 */}
       {pendingPermission && (
         <PermissionPrompt
           message={pendingPermission.approvalMessage}
@@ -390,22 +366,26 @@ export function App({ apiKey, baseURL, model }: AppProps) {
         />
       )}
 
-      <Static items={staticMessages}>
-        {(message, index) => (
-          <MessageLine key={`${index}-${message.role}`} message={message} />
+      {/* 消息区域：flexGrow 自动撑满，overflow 裁剪旧消息，自然滚动到最新 */}
+      <Box flexDirection="column" flexGrow={1} overflow="hidden">
+        {showEmpty ? (
+          <Box flexDirection="column" paddingY={1}>
+            <Text bold color="cyan" wrap="truncate-end">ttcode</Text>
+            <Text dimColor wrap="truncate-end">AI 编码助手 | 输入任务开始</Text>
+            <Text dimColor wrap="truncate-end">/clear 清屏 | /exit 退出 | Esc 取消当前任务</Text>
+          </Box>
+        ) : (
+          allMessages.map((msg, i) => (
+            <MessageLine key={`${i}-${msg.role}`} message={msg} />
+          ))
         )}
-      </Static>
-
-      <Box flexDirection="column" flexGrow={1}>
-        <ChatView
-          messages={messages}
-          busy={busy}
-          showEmptyState={staticMessages.length === 0}
-        />
+        {busy && <Text dimColor>...</Text>}
       </Box>
 
+      {/* 任务列表 */}
       <TodoListView todos={todos} />
 
+      {/* 输入框 + 状态栏，固定底部 */}
       <Box
         flexDirection="column"
         borderStyle="single"
