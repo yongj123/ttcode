@@ -1,8 +1,9 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import { render, Box, Text, useInput, useApp } from "ink";
+import { render, Box, Text, useInput, useApp, useStdout, Static } from "ink";
 import { LLMClient } from "../client";
 import { Agent } from "../Agent";
 import { ChatView } from "./ChatView";
+import { MessageLine } from "./MessageLine";
 import { InputBox } from "./InputBox";
 import { PermissionPrompt } from "./PermissionPrompt";
 import { SessionList } from "./SessionList";
@@ -34,13 +35,14 @@ function isDangerousTool(toolName?: string): boolean {
 
 export function App({ apiKey, baseURL, model }: AppProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [staticMessages, setStaticMessages] = useState<ChatMessage[]>([]);
   const [busy, setBusy] = useState(false);
   const [statusLine, setStatusLine] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>("chat");
   const [sessions, setSessions] = useState<ReturnType<typeof SessionManager.prototype.list>>([]);
   const { exit } = useApp();
-
-  // ---- 持久引用 ----
+  const { stdout } = useStdout();
+  const terminalWidth = stdout?.columns ?? 80;
   const clientRef = useRef<LLMClient | null>(null);
   const agentRef = useRef<Agent | null>(null);
   const sessionRef = useRef<SessionManager | null>(null);
@@ -121,9 +123,10 @@ export function App({ apiKey, baseURL, model }: AppProps) {
         sessionManager.updateTitle(text.slice(0, 40));
       }
 
-      // 添加用户消息
+      // 添加用户消息到静态历史区，避免输入框变化时反复重绘历史内容。
       const userMsg: ChatMessage = { role: "user", content: text };
-      setMessages((prev) => [...prev, userMsg]);
+      setStaticMessages((prev) => [...prev, userMsg]);
+      setMessages([]);
 
       abortRef.current = new AbortController();
       const agent = agentRef.current!;
@@ -154,7 +157,7 @@ export function App({ apiKey, baseURL, model }: AppProps) {
 
             case "tool_call_result":
               setStatusLine("");
-              setMessages((prev) => [
+              setStaticMessages((prev) => [
                 ...prev,
                 {
                   role: "tool",
@@ -179,14 +182,20 @@ export function App({ apiKey, baseURL, model }: AppProps) {
               setStatusLine(
                 `✅ 完成 | tokens: ${event.usage?.input ?? 0}→${event.usage?.output ?? 0}`
               );
+              if (assistantContent) {
+                setStaticMessages((prev) => [
+                  ...prev,
+                  { role: "assistant", content: assistantContent },
+                ]);
+                setMessages([]);
+              }
               // 持久化
               const msgs = agent.getMessages();
               sessionManager.updateMessages(msgs);
               break;
             }
 
-            case "error":
-              busyRef.current = false;
+            case "error":              busyRef.current = false;
               setBusy(false);
               setStatusLine(`❌ ${event.content}`);
               break;
@@ -222,11 +231,13 @@ export function App({ apiKey, baseURL, model }: AppProps) {
           break;
         case "/clear":
           setMessages([]);
+          setStaticMessages([]);
           agentRef.current?.reset();
           sessionManager.create();
           break;
         case "/new":
           setMessages([]);
+          setStaticMessages([]);
           agentRef.current?.reset();
           sessionManager.create();
           setStatusLine("新对话已创建");
@@ -297,7 +308,8 @@ export function App({ apiKey, baseURL, model }: AppProps) {
         }
       }
 
-      setMessages(uiMessages);
+      setStaticMessages(uiMessages);
+      setMessages([]);
       setStatusLine(`已恢复: ${session.title}`);
     },
     [sessionManager]
@@ -340,12 +352,29 @@ export function App({ apiKey, baseURL, model }: AppProps) {
         />
       )}
 
-      <Box flexDirection="column" flexGrow={1}>
-        <ChatView messages={messages} busy={busy} />
+      <Static items={staticMessages}>
+        {(message, index) => (
+          <MessageLine key={`${index}-${message.role}`} message={message} />
+        )}
+      </Static>
+
+      <Box flexDirection="column">
+        <ChatView
+          messages={messages}
+          busy={busy}
+          showEmptyState={staticMessages.length === 0}
+        />
       </Box>
 
-      <Box flexDirection="column" borderStyle="single" borderColor="gray">
-        <InputBox onSubmit={handleSubmit} busy={busy} />
+      <Box
+        flexDirection="column"
+        borderStyle="single"
+        borderColor="gray"
+        width={terminalWidth}
+        height={statusLine ? 4 : 3}
+        overflow="hidden"
+      >
+        <InputBox onSubmit={handleSubmit} busy={busy} onInputChange={() => setStatusLine("")} />
         {statusLine ? <Text dimColor>{statusLine}</Text> : null}
       </Box>
     </Box>
