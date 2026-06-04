@@ -340,7 +340,7 @@ export function App({ apiKey, baseURL, model }: AppProps) {
         />
       )}
 
-      <Box flexDirection="column" flexGrow={1} overflowY="hidden">
+      <Box flexDirection="column" flexGrow={1}>
         <ChatView messages={messages} busy={busy} />
       </Box>
 

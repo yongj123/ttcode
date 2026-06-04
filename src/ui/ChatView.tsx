@@ -1,4 +1,4 @@
-import { Box, Text } from "ink";
+import { Box, Text, useStdout } from "ink";
 import type { ChatMessage } from "./App";
 
 interface Props {
@@ -7,6 +7,10 @@ interface Props {
 }
 
 export function ChatView({ messages, busy }: Props) {
+  const { stdout } = useStdout();
+  // 预留顶部提示 + 输入区域 + 状态栏 ≈ 5 行
+  const maxVisible = Math.max(3, (stdout?.rows ?? 24) - 5);
+
   if (messages.length === 0) {
     return (
       <Box flexDirection="column" paddingY={1}>
@@ -17,14 +21,19 @@ export function ChatView({ messages, busy }: Props) {
     );
   }
 
+  const hidden = messages.length - maxVisible;
+
   return (
     <Box flexDirection="column">
-      {messages.map((msg, i) => (
+      {hidden > 0 && (
+        <Text dimColor>
+          ... 以上省略 {hidden} 条消息，共 {messages.length} 条
+        </Text>
+      )}
+      {messages.slice(-maxVisible).map((msg, i) => (
         <MessageLine key={i} message={msg} />
       ))}
-      {busy && (
-        <Text dimColor>...</Text>
-      )}
+      {busy && <Text dimColor>...</Text>}
     </Box>
   );
 }
@@ -34,7 +43,9 @@ function MessageLine({ message }: { message: ChatMessage }) {
     case "user":
       return (
         <Box marginBottom={1}>
-          <Text color="green" bold>👤 </Text>
+          <Text color="green" bold>
+            👤{" "}
+          </Text>
           <Text>{message.content}</Text>
         </Box>
       );
@@ -50,7 +61,8 @@ function MessageLine({ message }: { message: ChatMessage }) {
       return (
         <Box marginBottom={1}>
           <Text color="yellow" dimColor>
-            🔧 {message.toolName}: {message.toolResult?.userSummary || message.content}
+            🔧 {message.toolName}:{" "}
+            {message.toolResult?.userSummary || message.content}
           </Text>
         </Box>
       );
