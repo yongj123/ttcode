@@ -353,6 +353,6 @@ export function App({ apiKey, baseURL, model }: AppProps) {
 }
 
 export function renderApp(props: AppProps) {
-  const { waitUntilExit } = render(<App {...props} />, { exitOnCtrlC: false });
+  const { waitUntilExit } = render(<App {...props} />);
   return waitUntilExit;
 }
