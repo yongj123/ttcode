@@ -387,7 +387,7 @@ export function App({ apiKey, baseURL, model }: AppProps) {
         )}
       </Static>
 
-      <Box flexDirection="column">
+      <Box flexDirection="column" flexGrow={1}>
         <ChatView
           messages={messages}
           busy={busy}

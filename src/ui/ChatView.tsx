@@ -1,4 +1,4 @@
-import { Box, Text, useStdout } from "ink";
+import { Box, Text } from "ink";
 import type { ChatMessage } from "./App";
 import { MessageLine } from "./MessageLine";
 
@@ -9,9 +9,8 @@ interface Props {
 }
 
 export function ChatView({ messages, busy, showEmptyState }: Props) {
-  const { stdout } = useStdout();
   // 仅渲染进行中的最后一条助手消息；历史消息交给 <Static>，避免输入框变化时反复擦写历史区。
-  const maxVisibleRows = Math.max(3, (stdout?.rows ?? 24) - 7);
+  // flexGrow={1} 由父容器提供，自动占据 Static 和底部输入框之间的剩余空间。
 
   if (messages.length === 0) {
     if (!showEmptyState) return null;
@@ -29,7 +28,7 @@ export function ChatView({ messages, busy, showEmptyState }: Props) {
   if (!busy || lastMessage?.role !== "assistant") return null;
 
   return (
-    <Box flexDirection="column" height={maxVisibleRows} overflow="hidden">
+    <Box flexDirection="column" flexGrow={1} overflow="hidden">
       <MessageLine message={lastMessage} />
       {busy && <Text dimColor>...</Text>}
     </Box>
