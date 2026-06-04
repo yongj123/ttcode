@@ -59,11 +59,12 @@ export class AutoAllowResolver implements PermissionResolver {
     this.autoApproveAll = autoApproveAll;
   }
 
-  async resolve(tool: Tool, _input: unknown): Promise<PermissionDecision> {
-    if (tool.permission === "deny") {
+  async resolve(tool: Tool, input: unknown): Promise<PermissionDecision> {
+    const level = tool.resolvePermission(input);
+    if (level === "deny") {
       return { allowed: false, reason: `工具 ${tool.name} 已被禁止使用` };
     }
-    if (tool.permission === "allow") {
+    if (level === "allow") {
       return { allowed: true };
     }
     // ask 级别
@@ -102,11 +103,13 @@ export class InteractiveResolver implements PermissionResolver {
     tool: Tool,
     input: unknown
   ): Promise<PermissionDecision> {
-    if (tool.permission === "deny") {
+    const level = tool.resolvePermission(input);
+
+    if (level === "deny") {
       return { allowed: false, reason: `工具 ${tool.name} 已被禁止使用` };
     }
 
-    if (tool.permission === "allow") {
+    if (level === "allow") {
       return { allowed: true };
     }
 

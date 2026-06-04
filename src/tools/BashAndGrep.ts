@@ -6,18 +6,33 @@ import { spawnSync } from "child_process";
 // 危险命令检测
 // ================================================================
 
-/** 高风险命令模式：匹配即触发警告 */
+/** 高风险命令模式：匹配即触发确认 */
 const DANGEROUS_PATTERNS: { pattern: RegExp; risk: string }[] = [
-  { pattern: /\brm\s+(-rf?\s+)?(\/|~|\*)/, risk: "删除文件/目录" },
+  { pattern: /(^|[;&|()])\s*rm\s+/, risk: "删除文件/目录" },
+  { pattern: /(^|\s)unlink\s+/, risk: "删除文件" },
+  { pattern: /\bfind\b[\s\S]*(\s-delete\b|\s-exec\b|\s-ok\b)/, risk: "find 执行删除或外部命令" },
+  { pattern: /\bxargs\b[\s\S]*\brm\b/, risk: "批量删除文件/目录" },
+  { pattern: /(^|\s)(mv|cp)\s+.*\s+\//, risk: "移动/复制到系统路径" },
+  { pattern: /(^|\s)truncate\s+/, risk: "截断文件内容" },
+  { pattern: /(^|\s)tee\s+/, risk: "写入文件" },
+  { pattern: /(^|[^2])>\s*(?!&)/, risk: "重定向写文件" },
   { pattern: />\s*\/dev\//, risk: "写入设备文件" },
   { pattern: /\bmkfs\b/, risk: "格式化文件系统" },
-  { pattern: /\bdd\s+if=/, risk: "磁盘直接读写" },
-  { pattern: /\bchmod\s+(-R\s+)?777/, risk: "宽松权限设置" },
+  { pattern: /\bdd\s+/, risk: "磁盘直接读写" },
+  { pattern: /\bchmod\s+(-R\s+)?(777|\+w)/, risk: "宽松权限设置" },
+  { pattern: /\bchown\s+(-R\s+)?/, risk: "修改文件所有者" },
   { pattern: /\bcurl\b.*\|\s*(ba)?sh/, risk: "远程脚本直接执行" },
+  { pattern: /\bwget\b.*\|\s*(ba)?sh/, risk: "远程脚本直接执行" },
+  { pattern: /\b(node|python|python3|ruby|perl)\s+(-e|-c)\b/, risk: "执行内联脚本" },
+  { pattern: /\b(sed|perl)\s+[^;&|]*\s-i\b/, risk: "原地修改文件" },
+  { pattern: /\b(npm|pnpm|yarn|bun)\s+(install|add|remove|uninstall|update)\b/, risk: "修改依赖" },
+  { pattern: /\b(pip|pip3)\s+(install|uninstall)\b/, risk: "修改 Python 依赖" },
   { pattern: /\bgit\s+push\s+.*(--force|-f)/, risk: "强制推送" },
   { pattern: /\bgit\s+reset\s+--hard/, risk: "Git 硬重置" },
+  { pattern: /\bgit\s+clean\s+/, risk: "清理未跟踪文件" },
+  { pattern: /\bgit\s+(checkout|restore)\s+.*(--|\.)/, risk: "还原工作区文件" },
   { pattern: /\bdocker\s+rm\s+-f/, risk: "强制删除容器" },
-  { pattern: /\bkill\s+-9/, risk: "强制杀进程" },
+  { pattern: /\bkill\s+(-9|-KILL)\b/, risk: "强制杀进程" },
   { pattern: /\bsudo\b/, risk: "提权操作" },
 ];
 
@@ -36,6 +51,7 @@ export class BashTool extends Tool {
   description =
     "在终端中执行 shell 命令。用于运行构建、测试、git 操作等。命令超时 60 秒。\n" +
     "⚠️ 以下操作会触发额外警告：rm -rf、curl|sh、git push -f、sudo、chmod 777 等。";
+  /** 静态标记为 ask，运行时根据命令内容动态降级为 allow */
   permission = "ask" as const;
 
   inputSchema = z.object({
@@ -44,6 +60,14 @@ export class BashTool extends Tool {
   });
 
   private readonly DEFAULT_TIMEOUT = 60_000;
+
+  /** 安全命令自动放行，危险命令才询问用户 */
+  resolvePermission(raw: unknown): "allow" | "ask" {
+    const parsed = this.inputSchema.safeParse(raw);
+    if (!parsed.success) return "ask";
+    const risks = detectDanger(parsed.data.command);
+    return risks.length === 0 ? "allow" : "ask";
+  }
 
   /** 重写审批信息：展示完整命令 + 工作目录 + 风险提示 */
   getApprovalMessage(raw: unknown): string {

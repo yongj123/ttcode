@@ -47,6 +47,16 @@ export abstract class Tool<TInput extends z.ZodTypeAny = z.ZodTypeAny> {
   abstract permission: PermissionLevel;
 
   /**
+   * 根据输入动态决定权限级别。
+   * 默认返回静态 permission。子类可重写以实现按参数动态分级。
+   *
+   * 例如：BashTool 对安全命令（find/ls）自动放行，危险命令（rm -rf）才询问。
+   */
+  resolvePermission(_raw: unknown): PermissionLevel {
+    return this.permission;
+  }
+
+  /**
    * 执行工具。
    * 子类实现具体逻辑。
    */
