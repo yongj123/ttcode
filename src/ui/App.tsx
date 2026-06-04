@@ -46,6 +46,8 @@ export function App({ apiKey, baseURL, model }: AppProps) {
   const sessionRef = useRef<SessionManager | null>(null);
   const resolverRef = useRef<InteractiveResolver | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  /** 同步防重入守卫：state 是异步的，ref 可以立即阻断重复调用 */
+  const busyRef = useRef(false);
 
   // ---- 权限确认状态 ----
   const [pendingPermission, setPendingPermission] = useState<{
@@ -71,6 +73,7 @@ export function App({ apiKey, baseURL, model }: AppProps) {
   useInput((_input, key) => {
     if (key.escape && busy && abortRef.current) {
       abortRef.current.abort();
+      busyRef.current = false;
       setBusy(false);
       setStatusLine("已取消");
       // 释放权限等待（防止 generator 悬挂）
@@ -99,7 +102,7 @@ export function App({ apiKey, baseURL, model }: AppProps) {
   // ---- 提交处理 ----
   const handleSubmit = useCallback(
     async (text: string) => {
-      if (!text.trim() || busy) return;
+      if (!text.trim() || busyRef.current) return;
 
       // 命令处理
       if (text.startsWith("/")) {
@@ -107,6 +110,7 @@ export function App({ apiKey, baseURL, model }: AppProps) {
         return;
       }
 
+      busyRef.current = true;
       setBusy(true);
       setStatusLine("");
 
@@ -170,6 +174,7 @@ export function App({ apiKey, baseURL, model }: AppProps) {
               break;
 
             case "done": {
+              busyRef.current = false;
               setBusy(false);
               setStatusLine(
                 `✅ 完成 | tokens: ${event.usage?.input ?? 0}→${event.usage?.output ?? 0}`
@@ -181,17 +186,19 @@ export function App({ apiKey, baseURL, model }: AppProps) {
             }
 
             case "error":
+              busyRef.current = false;
               setBusy(false);
               setStatusLine(`❌ ${event.content}`);
               break;
           }
         }
       } catch (err) {
+        busyRef.current = false;
         setBusy(false);
         setStatusLine(`❌ ${err instanceof Error ? err.message : String(err)}`);
       }
     },
-    [busy, exit, sessionManager, permissionResolver]
+    [exit, sessionManager, permissionResolver]
   );
 
   // ---- 权限确认 ----
