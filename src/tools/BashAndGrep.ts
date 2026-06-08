@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { Tool, type ToolResult } from "../Tool";
 import { spawn } from "child_process";
+import * as path from "path";
 
 // ================================================================
 // 危险命令检测
@@ -51,6 +52,8 @@ interface SpawnResult {
   stderr: string;
   exitCode: number;
   error?: Error;
+  timedOut?: boolean;
+  outputExceeded?: boolean;
 }
 
 /** 通过 shell 执行命令（用于 BashTool，支持管道、重定向等 shell 特性） */
@@ -69,43 +72,61 @@ function runCommand(
 
     let stdout = "";
     let stderr = "";
-    let exceeded = false;
+    let outputExceeded = false;
+    let timedOut = false;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
 
     child.stdout?.on("data", (data: Buffer) => {
-      if (exceeded) return;
+      if (outputExceeded) return;
       stdout += data.toString();
       if (stdout.length > maxOutputBytes) {
-        exceeded = true;
+        outputExceeded = true;
         child.kill("SIGTERM");
+        // SIGKILL 兜底：3 秒后仍不退出则强杀
+        killTimer = setTimeout(() => child.kill("SIGKILL"), 3000);
         stderr += "\n[输出超过大小限制，已终止]";
       }
     });
 
     child.stderr?.on("data", (data: Buffer) => {
-      stderr += data.toString();
+      if (stderr.length < maxOutputBytes) {
+        stderr += data.toString();
+        if (stderr.length > maxOutputBytes) {
+          stderr = stderr.slice(0, maxOutputBytes) + "\n[stderr 已截断]";
+        }
+      }
     });
 
     const timer = setTimeout(() => {
+      timedOut = true;
       child.kill("SIGTERM");
+      // SIGKILL 兜底
+      killTimer = setTimeout(() => child.kill("SIGKILL"), 3000);
       stderr += "\n[命令超时，已终止]";
     }, timeout);
 
     child.on("close", (code: number | null) => {
       clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       resolve({
         stdout: stdout.trim(),
         stderr: stderr.trim(),
         exitCode: code ?? 1,
+        timedOut,
+        outputExceeded,
       });
     });
 
     child.on("error", (err: Error) => {
       clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       resolve({
         stdout: "",
         stderr: "",
         exitCode: 1,
         error: err,
+        timedOut: false,
+        outputExceeded: false,
       });
     });
   });
@@ -127,43 +148,59 @@ function runCommandDirect(
 
     let stdout = "";
     let stderr = "";
-    let exceeded = false;
+    let outputExceeded = false;
+    let timedOut = false;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
 
     child.stdout?.on("data", (data: Buffer) => {
-      if (exceeded) return;
+      if (outputExceeded) return;
       stdout += data.toString();
       if (stdout.length > maxOutputBytes) {
-        exceeded = true;
+        outputExceeded = true;
         child.kill("SIGTERM");
+        killTimer = setTimeout(() => child.kill("SIGKILL"), 3000);
         stderr += "\n[输出超过大小限制，已终止]";
       }
     });
 
     child.stderr?.on("data", (data: Buffer) => {
-      stderr += data.toString();
+      if (stderr.length < maxOutputBytes) {
+        stderr += data.toString();
+        if (stderr.length > maxOutputBytes) {
+          stderr = stderr.slice(0, maxOutputBytes) + "\n[stderr 已截断]";
+        }
+      }
     });
 
     const timer = setTimeout(() => {
+      timedOut = true;
       child.kill("SIGTERM");
+      killTimer = setTimeout(() => child.kill("SIGKILL"), 3000);
       stderr += "\n[命令超时，已终止]";
     }, timeout);
 
     child.on("close", (code: number | null) => {
       clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       resolve({
         stdout: stdout.trim(),
         stderr: stderr.trim(),
         exitCode: code ?? 1,
+        timedOut,
+        outputExceeded,
       });
     });
 
     child.on("error", (err: Error) => {
       clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       resolve({
         stdout: "",
         stderr: "",
         exitCode: 1,
         error: err,
+        timedOut: false,
+        outputExceeded: false,
       });
     });
   });
@@ -226,6 +263,8 @@ export class BashTool extends Tool {
     if (result.stdout) llmContent += result.stdout;
     if (result.stderr) llmContent += (llmContent ? "\n\n[stderr]\n" : "") + result.stderr;
     if (result.error) llmContent += `\n\n[执行异常]\n${result.error.message}`;
+    if (result.timedOut) llmContent += "\n\n[命令超时，输出可能不完整]";
+    if (result.outputExceeded) llmContent += "\n\n[输出超过大小限制，已截断]";
     if (!llmContent) llmContent = `(无输出)`;
     llmContent += `\n\n退出码: ${result.exitCode}`;
 
@@ -268,12 +307,13 @@ export class GrepTool extends Tool {
     }
 
     args.push(input.pattern);
-    args.push(input.path || process.cwd());
+    const searchPath = path.resolve(input.path || process.cwd());
+    args.push(searchPath);
 
     const result = await runCommandDirect(
       "rg",
       args,
-      input.path || process.cwd(),
+      process.cwd(),
       15_000,
     );
 
@@ -288,10 +328,23 @@ export class GrepTool extends Tool {
       return this.fail(`搜索执行失败: ${result.error.message}`, "搜索失败");
     }
 
+    // 超时或输出超限
+    if (result.timedOut) {
+      return this.fail("搜索超时，已终止。请缩小搜索范围或使用更精确的模式。", `搜索 '${input.pattern}' 超时`);
+    }
+    if (result.outputExceeded) {
+      return this.fail("搜索结果过大，已截断。请缩小搜索范围或使用更精确的模式。", `搜索 '${input.pattern}' 输出过大`);
+    }
+
     // rg 退出码: 0=有匹配, 1=无匹配, 2=错误（正则错误、权限等）
     if (result.exitCode === 2) {
       const errMsg = result.stderr || "未知错误";
       return this.fail(`搜索出错: ${errMsg}`, `搜索 '${input.pattern}' 出错`);
+    }
+
+    // 其它非 0/1 退出码（不应出现，但防御性处理）
+    if (result.exitCode !== 0 && result.exitCode !== 1) {
+      return this.fail(`搜索异常退出 (exitCode=${result.exitCode}): ${result.stderr || "未知错误"}`, `搜索 '${input.pattern}' 异常`);
     }
 
     const lines = result.stdout.split("\n").filter(Boolean);

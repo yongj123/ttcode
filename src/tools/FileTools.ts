@@ -60,6 +60,11 @@ export class GlobTool extends Tool {
       return this.fail(`目录不存在: ${cwd}`, `目录不存在: ${cwd}`);
     }
 
+    const cwdStat = fs.statSync(cwd);
+    if (!cwdStat.isDirectory()) {
+      return this.fail(`${cwd} 不是目录`, `${input.path} 不是目录`);
+    }
+
     try {
       const glob = new Glob(input.pattern);
       const matches: string[] = [];
@@ -250,9 +255,11 @@ export class MultiEditTool extends Tool<typeof MULTI_EDIT_SCHEMA> {
     input: z.infer<typeof this.inputSchema>
   ): Promise<ToolResult> {
     const results: string[] = [];
+    const writes: { resolved: string; replaced: string }[] = [];
     let successCount = 0;
     let failCount = 0;
 
+    // 阶段 1：全量校验
     for (const edit of input.edits) {
       const resolved = path.resolve(edit.filePath);
 
@@ -278,12 +285,29 @@ export class MultiEditTool extends Tool<typeof MULTI_EDIT_SCHEMA> {
       }
 
       const replaced = original.replace(edit.oldString, edit.newString);
-      fs.writeFileSync(resolved, replaced, "utf-8");
+      writes.push({ resolved, replaced });
       results.push(`✅ ${edit.filePath}: 替换1处`);
       successCount++;
     }
 
-    const summary = `批量编辑: ${successCount}成功 / ${failCount}失败`;
+    // 阶段 2：统一写入（校验全通过才写入）
+    if (failCount === 0) {
+      for (const { resolved, replaced } of writes) {
+        fs.writeFileSync(resolved, replaced, "utf-8");
+      }
+    } else {
+      // 有失败的，全部不写入，将之前的成功标记改为跳过
+      for (let i = 0; i < results.length; i++) {
+        if (results[i].startsWith("✅")) {
+          results[i] = results[i].replace("✅", "⏭️") + " (因其它编辑失败而跳过)";
+        }
+      }
+      successCount = 0;
+    }
+
+    const summary = failCount > 0
+      ? `批量编辑: 校验失败 ${failCount} 项，全部跳过`
+      : `批量编辑: ${successCount}项全部成功`;
     return this.ok(results.join("\n"), summary);
   }
 }

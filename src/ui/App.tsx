@@ -288,6 +288,9 @@ export function App({ apiKey, baseURL, model }: AppProps) {
       if (session.todos && session.todos.length > 0) {
         agentRef.current!.setTodos(session.todos);
         setTodos(session.todos);
+      } else {
+        agentRef.current!.setTodos([]);
+        setTodos([]);
       }
 
       const toolNameMap = new Map<string, string>();
