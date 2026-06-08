@@ -20,6 +20,7 @@ ttcode 是一个基于 ReAct Agent 架构的终端编程助手，提供交互式
 # 需要 Bun 运行时
 bun install
 bun run build
+npm link   # 注册全局 ttcode 命令
 ```
 
 ## 🚀 使用
@@ -77,6 +78,7 @@ src/
 ├── permission.ts        # 权限系统（交互式/非交互式解析器）
 ├── session.ts           # 会话管理（持久化到 ~/.ttcode/sessions/）
 ├── tools/
+│   ├── index.ts         # 工具统一导出入口
 │   ├── FileTools.ts     # read_file / write_to_file / edit_file
 │   ├── BashAndGrep.ts   # execute_command / search_code
 │   └── TodoTools.ts     # todo_write / todo_read
