@@ -41,20 +41,20 @@ if (args.includes("--help") || args.includes("-h")) {
   process.exit(0);
 }
 
-const apiKey = process.env.DEEPSEEK_API_KEY;
-if (!apiKey) {
-  process.stderr.write(
-    "❌ 缺少 DEEPSEEK_API_KEY 环境变量。\n" +
-      "请设置: export DEEPSEEK_API_KEY=your-key\n" +
-      "或在 ~/.ttcode/config.json 中配置 apiKey 字段。\n"
-  );
-  process.exit(1);
-}
-
 // 按模式选择入口
 void (async () => {
   const { loadConfig } = await import("./config");
   const cfg = loadConfig();
+
+  const apiKey = cfg.apiKey;
+  if (!apiKey) {
+    process.stderr.write(
+      "❌ 缺少 API Key。\n" +
+        "请设置: export DEEPSEEK_API_KEY=your-key\n" +
+        "或在 ~/.ttcode/config.json 中配置 apiKey 字段。\n"
+    );
+    process.exit(1);
+  }
 
   const baseURL = cfg.baseURL || "https://api.deepseek.com";
   const model = cfg.model || "deepseek-v4-pro";

@@ -53,6 +53,7 @@ interface SpawnResult {
   error?: Error;
 }
 
+/** 通过 shell 执行命令（用于 BashTool，支持管道、重定向等 shell 特性） */
 function runCommand(
   command: string,
   cwd: string,
@@ -61,6 +62,56 @@ function runCommand(
   return new Promise((resolve) => {
     const child = spawn(command, [], {
       shell: true,
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout?.on("data", (data: Buffer) => {
+      stdout += data.toString();
+    });
+
+    child.stderr?.on("data", (data: Buffer) => {
+      stderr += data.toString();
+    });
+
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      stderr += "\n[命令超时，已终止]";
+    }, timeout);
+
+    child.on("close", (code: number | null) => {
+      clearTimeout(timer);
+      resolve({
+        stdout: stdout.trim(),
+        stderr: stderr.trim(),
+        exitCode: code ?? 1,
+      });
+    });
+
+    child.on("error", (err: Error) => {
+      clearTimeout(timer);
+      resolve({
+        stdout: "",
+        stderr: "",
+        exitCode: 1,
+        error: err,
+      });
+    });
+  });
+}
+
+/** 直接执行命令（不经过 shell，参数安全传递，用于 GrepTool 等不需要 shell 特性的场景） */
+function runCommandDirect(
+  command: string,
+  args: string[],
+  cwd: string,
+  timeout: number,
+): Promise<SpawnResult> {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -203,8 +254,9 @@ export class GrepTool extends Tool {
     args.push(input.pattern);
     args.push(input.path || process.cwd());
 
-    const result = await runCommand(
-      `rg ${args.map((a) => `'${a}'`).join(" ")}`,
+    const result = await runCommandDirect(
+      "rg",
+      args,
       input.path || process.cwd(),
       15_000,
     );
