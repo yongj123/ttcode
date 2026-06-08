@@ -188,6 +188,7 @@ export function App({ apiKey, baseURL, model }: AppProps) {
               });
               const msgs = agent.getMessages();
               sessionManager.updateMemory(msgs, agent.getSummary());
+              sessionManager.updateTodos(agent.getTodos());
               break;
             }
 
@@ -282,6 +283,10 @@ export function App({ apiKey, baseURL, model }: AppProps) {
       setViewMode("chat");
       agentRef.current!.setMessages(session.messages);
       agentRef.current!.setSummary(session.summary);
+      if (session.todos && session.todos.length > 0) {
+        agentRef.current!.setTodos(session.todos);
+        setTodos(session.todos);
+      }
 
       const toolNameMap = new Map<string, string>();
       for (const m of session.messages) {

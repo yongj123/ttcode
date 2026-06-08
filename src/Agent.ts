@@ -302,6 +302,10 @@ export class Agent {
     return this.todoStore.list();
   }
 
+  setTodos(todos: TodoItem[]): void {
+    this.todoStore.replace(todos);
+  }
+
   getUsage(): { input: number; output: number } {
     return { ...this.usage };
   }

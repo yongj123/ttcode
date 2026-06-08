@@ -4,6 +4,7 @@ import * as os from "os";
 import { randomUUID } from "crypto";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import type { ConversationSummary } from "./memory/MemoryManager";
+import type { TodoItem } from "./tools/TodoTools";
 
 // ================================================================
 // 类型定义
@@ -24,6 +25,7 @@ export interface SessionData {
   updateTime: string;
   messages: ChatCompletionMessageParam[];
   summary?: ConversationSummary;
+  todos?: TodoItem[];
 }
 
 // ================================================================
@@ -155,6 +157,14 @@ export class SessionManager {
     if (this.currentSession) {
       this.currentSession.messages = messages;
       this.currentSession.summary = summary;
+      this.save(this.currentSession);
+    }
+  }
+
+  /** 更新当前会话的 Todo 列表 */
+  updateTodos(todos: TodoItem[]): void {
+    if (this.currentSession) {
+      this.currentSession.todos = todos;
       this.save(this.currentSession);
     }
   }
