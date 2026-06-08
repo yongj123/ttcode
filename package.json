@@ -12,7 +12,7 @@
   ],
   "scripts": {
     "typecheck": "tsc -p ./ --noEmit",
-    "bundle": "bun build ./src/cli.tsx --outdir=dist --target=bun --format=esm",
+    "bundle": "bun build ./src/cli.tsx --outdir=dist --target=bun --format=esm --jsx=automatic",
     "build": "bun run typecheck && bun run bundle",
     "dev": "bun run --watch src/cli.tsx",
     "start": "bun run src/cli.tsx"
