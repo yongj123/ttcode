@@ -2,6 +2,91 @@ import { z } from "zod";
 import { Tool, type ToolResult } from "../Tool";
 import * as fs from "fs";
 import * as path from "path";
+import { Glob } from "bun";
+
+export class ListDirectoryTool extends Tool {
+  name = "list_directory";
+  description = "列出指定目录下的文件和子目录。用于探索项目结构。";
+  permission = "allow" as const;
+
+  inputSchema = z.object({
+    path: z.string().describe("目录绝对路径"),
+  });
+
+  protected async invoke(input: z.infer<typeof this.inputSchema>): Promise<ToolResult> {
+    const resolved = path.resolve(input.path);
+
+    if (!fs.existsSync(resolved)) {
+      return this.fail(`目录不存在: ${resolved}`, `目录不存在: ${input.path}`);
+    }
+
+    const stat = fs.statSync(resolved);
+    if (!stat.isDirectory()) {
+      return this.fail(`${resolved} 不是目录`, `${input.path} 不是目录`);
+    }
+
+    const entries = fs.readdirSync(resolved, { withFileTypes: true });
+    const lines = entries.map((entry) => {
+      const suffix = entry.isDirectory() ? "/" : "";
+      return `${entry.name}${suffix}`;
+    });
+
+    if (lines.length === 0) {
+      return this.ok("(空目录)", `列出 ${input.path}: 空目录`);
+    }
+
+    const content = lines.join("\n");
+    return this.ok(content, `列出 ${input.path} (${entries.length}项)`);
+  }
+}
+
+
+export class GlobTool extends Tool {
+  name = "find_files";
+  description = "按 glob 模式查找文件。用于按名称或路径模式搜索文件，如 '**/*.ts'、'src/**/*.tsx'。";
+  permission = "allow" as const;
+
+  inputSchema = z.object({
+    pattern: z.string().describe("glob 匹配模式，如 '**/*.ts'、'src/**/*.tsx'"),
+    path: z.string().optional().describe("搜索根目录，默认为当前工作目录"),
+    maxResults: z.number().optional().describe("最大结果数，默认 50"),
+  });
+
+  protected async invoke(input: z.infer<typeof this.inputSchema>): Promise<ToolResult> {
+    const cwd = input.path || process.cwd();
+    const maxResults = input.maxResults ?? 50;
+
+    if (!fs.existsSync(cwd)) {
+      return this.fail(`目录不存在: ${cwd}`, `目录不存在: ${cwd}`);
+    }
+
+    try {
+      const glob = new Glob(input.pattern);
+      const matches: string[] = [];
+      for await (const file of glob.scan({ cwd, dot: false })) {
+        matches.push(file);
+        if (matches.length >= maxResults) break;
+      }
+
+      if (matches.length === 0) {
+        return this.ok("未找到匹配文件", `查找 '${input.pattern}': 无结果`);
+      }
+
+      const content = matches.join("\n");
+      const truncated = matches.length >= maxResults
+        ? `查找 '${input.pattern}': 显示前 ${maxResults} 个结果`
+        : `查找 '${input.pattern}': 找到 ${matches.length} 个文件`;
+
+      return this.ok(content, truncated);
+    } catch (err) {
+      return this.fail(
+        `glob 匹配失败: ${err instanceof Error ? err.message : String(err)}`,
+        `查找 '${input.pattern}' 失败`
+      );
+    }
+  }
+}
+
 
 export class ReadTool extends Tool {
   name = "read_file";
@@ -141,5 +226,64 @@ export class EditTool extends Tool<typeof EDIT_SCHEMA> {
       `已替换 1 处匹配。文件: ${resolved}`,
       `编辑 ${input.filePath} (替换1处)`
     );
+  }
+}
+
+
+const MULTI_EDIT_SCHEMA = z.object({
+  edits: z.array(z.object({
+    filePath: z.string().describe("文件绝对路径"),
+    oldString: z.string().describe("要替换的精确文本片段"),
+    newString: z.string().describe("替换后的新文本"),
+  })).min(1).describe("要执行的编辑列表，每个编辑包含 filePath、oldString、newString"),
+});
+
+export class MultiEditTool extends Tool<typeof MULTI_EDIT_SCHEMA> {
+  name = "multi_edit";
+  description =
+    "在多个文件中批量执行精确文本替换。每个编辑项的 oldString 必须在对应文件中唯一匹配。所有编辑按顺序执行，某个编辑失败不影响后续编辑。";
+  permission = "ask" as const;
+
+  inputSchema = MULTI_EDIT_SCHEMA;
+
+  protected async invoke(
+    input: z.infer<typeof this.inputSchema>
+  ): Promise<ToolResult> {
+    const results: string[] = [];
+    let successCount = 0;
+    let failCount = 0;
+
+    for (const edit of input.edits) {
+      const resolved = path.resolve(edit.filePath);
+
+      if (!fs.existsSync(resolved)) {
+        results.push(`❌ ${edit.filePath}: 文件不存在`);
+        failCount++;
+        continue;
+      }
+
+      const original = fs.readFileSync(resolved, "utf-8");
+      const count = original.split(edit.oldString).length - 1;
+
+      if (count === 0) {
+        results.push(`❌ ${edit.filePath}: oldString 未找到`);
+        failCount++;
+        continue;
+      }
+
+      if (count > 1) {
+        results.push(`❌ ${edit.filePath}: oldString 匹配 ${count} 处，不唯一`);
+        failCount++;
+        continue;
+      }
+
+      const replaced = original.replace(edit.oldString, edit.newString);
+      fs.writeFileSync(resolved, replaced, "utf-8");
+      results.push(`✅ ${edit.filePath}: 替换1处`);
+      successCount++;
+    }
+
+    const summary = `批量编辑: ${successCount}成功 / ${failCount}失败`;
+    return this.ok(results.join("\n"), summary);
   }
 }

@@ -1,5 +1,5 @@
 import type { Tool } from "../Tool";
-import { ReadTool, WriteTool, EditTool } from "./FileTools";
+import { ListDirectoryTool, GlobTool, ReadTool, WriteTool, EditTool, MultiEditTool } from "./FileTools";
 import { BashTool, GrepTool } from "./BashAndGrep";
 import { TodoReadTool, TodoStore, TodoWriteTool } from "./TodoTools";
 
@@ -10,9 +10,12 @@ export interface ToolContext {
 export function createTools(context: ToolContext = {}): Tool[] {
   const todoStore = context.todoStore ?? new TodoStore();
   return [
+    new ListDirectoryTool(),
+    new GlobTool(),
     new ReadTool(),
     new WriteTool(),
     new EditTool(),
+    new MultiEditTool(),
     new BashTool(),
     new GrepTool(),
     new TodoWriteTool(todoStore),
