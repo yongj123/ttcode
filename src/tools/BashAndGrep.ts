@@ -58,6 +58,7 @@ function runCommand(
   command: string,
   cwd: string,
   timeout: number,
+  maxOutputBytes: number = 10 * 1024 * 1024,
 ): Promise<SpawnResult> {
   return new Promise((resolve) => {
     const child = spawn(command, [], {
@@ -68,9 +69,16 @@ function runCommand(
 
     let stdout = "";
     let stderr = "";
+    let exceeded = false;
 
     child.stdout?.on("data", (data: Buffer) => {
+      if (exceeded) return;
       stdout += data.toString();
+      if (stdout.length > maxOutputBytes) {
+        exceeded = true;
+        child.kill("SIGTERM");
+        stderr += "\n[输出超过大小限制，已终止]";
+      }
     });
 
     child.stderr?.on("data", (data: Buffer) => {
@@ -109,6 +117,7 @@ function runCommandDirect(
   args: string[],
   cwd: string,
   timeout: number,
+  maxOutputBytes: number = 5 * 1024 * 1024,
 ): Promise<SpawnResult> {
   return new Promise((resolve) => {
     const child = spawn(command, args, {
@@ -118,9 +127,16 @@ function runCommandDirect(
 
     let stdout = "";
     let stderr = "";
+    let exceeded = false;
 
     child.stdout?.on("data", (data: Buffer) => {
+      if (exceeded) return;
       stdout += data.toString();
+      if (stdout.length > maxOutputBytes) {
+        exceeded = true;
+        child.kill("SIGTERM");
+        stderr += "\n[输出超过大小限制，已终止]";
+      }
     });
 
     child.stderr?.on("data", (data: Buffer) => {

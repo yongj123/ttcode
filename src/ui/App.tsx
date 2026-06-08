@@ -161,6 +161,8 @@ export function App({ apiKey, baseURL, model }: AppProps) {
               ]);
               if (event.toolName === "todo_write" || event.toolName === "todo_read") {
                 setTodos(agentRef.current?.getTodos() ?? []);
+                // 立即持久化，避免中断丢失
+                sessionManager.updateTodos(agentRef.current?.getTodos() ?? []);
               }
               break;
 
