@@ -45,16 +45,19 @@ const apiKey = process.env.DEEPSEEK_API_KEY;
 if (!apiKey) {
   process.stderr.write(
     "❌ 缺少 DEEPSEEK_API_KEY 环境变量。\n" +
-      "请设置: export DEEPSEEK_API_KEY=your-key\n"
+      "请设置: export DEEPSEEK_API_KEY=your-key\n" +
+      "或在 ~/.ttcode/config.json 中配置 apiKey 字段。\n"
   );
   process.exit(1);
 }
 
-const baseURL = process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com";
-const model = process.env.DEEPSEEK_MODEL || "deepseek-v4-pro";
-
 // 按模式选择入口
 void (async () => {
+  const { loadConfig } = await import("./config");
+  const cfg = loadConfig();
+
+  const baseURL = cfg.baseURL || "https://api.deepseek.com";
+  const model = cfg.model || "deepseek-v4-pro";
   const promptIndex = args.findIndex(
     (a) => a === "-p" || a === "--prompt"
   );
