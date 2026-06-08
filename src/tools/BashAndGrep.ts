@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { Tool, type ToolResult } from "../Tool";
-import { spawnSync } from "child_process";
+import { spawn } from "child_process";
 
 // ================================================================
 // 危险命令检测
@@ -40,6 +40,66 @@ function detectDanger(command: string): string[] {
   return DANGEROUS_PATTERNS
     .filter(({ pattern }) => pattern.test(command))
     .map(({ risk }) => `⚠️ ${risk}`);
+}
+
+// ================================================================
+// 异步执行辅助
+// ================================================================
+
+interface SpawnResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  error?: Error;
+}
+
+function runCommand(
+  command: string,
+  cwd: string,
+  timeout: number,
+): Promise<SpawnResult> {
+  return new Promise((resolve) => {
+    const child = spawn(command, [], {
+      shell: true,
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout?.on("data", (data: Buffer) => {
+      stdout += data.toString();
+    });
+
+    child.stderr?.on("data", (data: Buffer) => {
+      stderr += data.toString();
+    });
+
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      stderr += "\n[命令超时，已终止]";
+    }, timeout);
+
+    child.on("close", (code: number | null) => {
+      clearTimeout(timer);
+      resolve({
+        stdout: stdout.trim(),
+        stderr: stderr.trim(),
+        exitCode: code ?? 1,
+      });
+    });
+
+    child.on("error", (err: Error) => {
+      clearTimeout(timer);
+      resolve({
+        stdout: "",
+        stderr: "",
+        exitCode: 1,
+        error: err,
+      });
+    });
+  });
 }
 
 // ================================================================
@@ -89,35 +149,30 @@ export class BashTool extends Tool {
   protected async invoke(
     input: z.infer<typeof this.inputSchema>
   ): Promise<ToolResult> {
-    const result = spawnSync(input.command, {
-      shell: true,
-      cwd: input.cwd || process.cwd(),
-      timeout: this.DEFAULT_TIMEOUT,
-      encoding: "utf-8",
-      maxBuffer: 10 * 1024 * 1024, // 10MB
-    });
-
-    const stdout = (result.stdout || "").trim();
-    const stderr = (result.stderr || "").trim();
-    const exitCode: number =
-      (result as unknown as { exitCode: number | null }).exitCode ??
-      (result.error ? 1 : 0);
+    const result = await runCommand(
+      input.command,
+      input.cwd || process.cwd(),
+      this.DEFAULT_TIMEOUT,
+    );
 
     let llmContent = "";
-    if (stdout) llmContent += stdout;
-    if (stderr) llmContent += (llmContent ? "\n\n[stderr]\n" : "") + stderr;
+    if (result.stdout) llmContent += result.stdout;
+    if (result.stderr) llmContent += (llmContent ? "\n\n[stderr]\n" : "") + result.stderr;
     if (result.error) llmContent += `\n\n[执行异常]\n${result.error.message}`;
     if (!llmContent) llmContent = `(无输出)`;
-    llmContent += `\n\n退出码: ${exitCode}`;
+    llmContent += `\n\n退出码: ${result.exitCode}`;
 
-    const truncated = llmContent.length > 2000
-      ? llmContent.slice(0, 2000) + "\n...(已截断)"
-      : llmContent;
+    // LLM 获取完整输出以保证推理质量；用户看简要
+    const userSummary = `执行: ${input.command} (退出码: ${result.exitCode})`;
 
-    return this.ok(truncated, `执行: ${input.command} (退出码: ${exitCode})`);
+    return this.ok(llmContent, userSummary);
   }
 }
 
+
+// ================================================================
+// GrepTool
+// ================================================================
 
 export class GrepTool extends Tool {
   name = "search_code";
@@ -148,14 +203,30 @@ export class GrepTool extends Tool {
     args.push(input.pattern);
     args.push(input.path || process.cwd());
 
-    const result = spawnSync("rg", args, {
-      encoding: "utf-8",
-      timeout: 15_000,
-      maxBuffer: 5 * 1024 * 1024,
-    });
+    const result = await runCommand(
+      `rg ${args.map((a) => `'${a}'`).join(" ")}`,
+      input.path || process.cwd(),
+      15_000,
+    );
 
-    const stdout = (result.stdout || "").trim();
-    const lines = stdout.split("\n").filter(Boolean);
+    // rg 不存在：ENOENT
+    if (result.error) {
+      if ("code" in result.error && (result.error as NodeJS.ErrnoException).code === "ENOENT") {
+        return this.fail(
+          "ripgrep (rg) 未安装或不在 PATH 中。请安装 ripgrep: https://github.com/BurntSushi/ripgrep#installation",
+          "rg 未安装"
+        );
+      }
+      return this.fail(`搜索执行失败: ${result.error.message}`, "搜索失败");
+    }
+
+    // rg 退出码: 0=有匹配, 1=无匹配, 2=错误（正则错误、权限等）
+    if (result.exitCode === 2) {
+      const errMsg = result.stderr || "未知错误";
+      return this.fail(`搜索出错: ${errMsg}`, `搜索 '${input.pattern}' 出错`);
+    }
+
+    const lines = result.stdout.split("\n").filter(Boolean);
     const maxResults = input.maxResults ?? 20;
     const truncated = lines.slice(0, maxResults);
 
@@ -163,11 +234,12 @@ export class GrepTool extends Tool {
       return this.ok("未找到匹配结果", `搜索 '${input.pattern}': 无结果`);
     }
 
+    const content = truncated.join("\n");
     const summary =
       truncated.length < lines.length
         ? `搜索 '${input.pattern}': 找到 ${lines.length} 个结果 (显示前 ${truncated.length})`
         : `搜索 '${input.pattern}': 找到 ${truncated.length} 个结果`;
 
-    return this.ok(truncated.join("\n"), summary);
+    return this.ok(content, summary);
   }
 }
